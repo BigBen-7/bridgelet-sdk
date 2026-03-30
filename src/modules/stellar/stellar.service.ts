@@ -30,10 +30,10 @@ export class StellarService {
   private contractId: string;
 
   constructor(private configService: ConfigService) {
-    const horizonUrl =
-      this.configService.getOrThrow<string>('stellar.horizonUrl');
-    this.network = this.configService.getOrThrow<string>('stellar.network');
-    this.server = new StellarSdk.Horizon.Server(horizonUrl);
+  const horizonUrl =
+    this.configService.getOrThrow<string>('stellar.horizonUrl');
+  this.network = this.configService.getOrThrow<string>('stellar.network');
+  this.server = new StellarSdk.Horizon.Server(horizonUrl);
 
     const sorobanRpcUrl = this.configService.getOrThrow<string>('stellar.sorobanRpcUrl');
     this.rpcServer = new rpc.Server(sorobanRpcUrl);
@@ -53,11 +53,14 @@ export class StellarService {
   }
 
   async createEphemeralAccount(params: {
-    publicKey: string;
-    amount: string;
-    asset: string;
-    expiresAt: Date;
-  }): Promise<string> {
+  publicKey: string;
+  secretKey: string;
+  amount: string;
+  asset: string;
+  expiresAt: Date;
+  expiresIn: number;
+  fundingSource: string;
+}): Promise<string> : Promise<string> {
     this.logger.log(`Creating ephemeral account: ${params.publicKey}`);
 
     const fundingSecret = this.configService.getOrThrow<string>(
@@ -86,8 +89,51 @@ export class StellarService {
     const result = await this.server.submitTransaction(transaction);
 
     this.logger.log(`Account created: ${result.hash}`);
-    return result.hash;
+
+// Call initialize() on the Soroban contract immediately after account creation
+await this.initializeEphemeralAccount({
+  ephemeralPublicKey: params.publicKey,
+  ephemeralSecretKey: params.secretKey,
+  expiresIn: params.expiresIn,
+  fundingSource: params.fundingSource,
+});
+
+return result.hash;
   }
+private async getCurrentLedger(): Promise<number> {
+  const latestLedger = await this.sorobanServer.getLatestLedger();
+  return latestLedger.sequence;
+}
+
+private async initializeEphemeralAccount(params: {
+  ephemeralPublicKey: string;
+  ephemeralSecretKey: string;
+  expiresIn: number;
+  fundingSource: string;
+}): Promise<void> {
+  this.logger.log(
+    `Initializing contract for account: ${params.ephemeralPublicKey}`,
+  );
+
+  // Get current ledger number from the blockchain
+  const currentLedger = await this.getCurrentLedger();
+
+  // Stellar produces ~1 ledger every 5 seconds
+  // Convert expiresIn (seconds) to ledger count
+  const LEDGER_CLOSE_TIME_SECONDS = 5;
+  const expiryLedger =
+    currentLedger +
+    Math.ceil(params.expiresIn / LEDGER_CLOSE_TIME_SECONDS);
+
+  // Build the keypair from the secret so we can sign the transaction
+  const ephemeralKeypair = StellarSdk.Keypair.fromSecret(
+    params.ephemeralSecretKey,
+  );
+
+  // Load the ephemeral account from Soroban RPC
+  const ephemeralAccount = await this.sorobanServer.getAccount(
+    params.ephemeralPublicKey,
+  );
 
   /**
    * Reads on-chain account state from the EphemeralAccount contract.
